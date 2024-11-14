@@ -3,7 +3,6 @@ package types
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 )
 
@@ -41,22 +40,6 @@ type SyncOptions struct {
 	Parallel            int
 	ConflictResolution  string
 	IncrementalSync     bool
-}
-
-type Logger struct {
-	LogFile string
-}
-
-func (l *Logger) LogError(message string) {
-	// Implementation for error logging
-	// For now, just print to stderr
-	fmt.Fprintf(os.Stderr, "[ERROR] %s\n", message)
-}
-
-func (l *Logger) LogInfo(message string) {
-	// Implementation for info logging
-	// For now, just print to stdout
-	fmt.Printf("[INFO] %s\n", message)
 }
 
 type Notifier struct {

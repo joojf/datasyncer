@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"datasyncer/sync"
+	"datasyncer/types"
 )
 
 type CloudProvider string
@@ -53,13 +55,9 @@ type CloudStorage interface {
 
 type SyncManager struct {
 	providers map[CloudProvider]CloudStorage
-	logger    *Logger
+	logger    *types.Logger
+	recovery  *sync.RecoveryManager
 	notifier  *Notifier
-}
-
-type Logger struct {
-	logFile *os.File
-	mu      sync.Mutex
 }
 
 type Notifier struct {
@@ -74,11 +72,48 @@ type EmailConfig struct {
 	FromEmail  string
 }
 
+type contextKey string
+
+const (
+	syncManagerKey contextKey = "syncManager"
+)
+
 func main() {
+	logger, err := types.NewLogger("sync.log", types.INFO)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer logger.Close()
+
+	recovery, err := sync.NewRecoveryManager("sync_state.json", 3)
+	if err != nil {
+		logger.LogError(fmt.Sprintf("Failed to initialize recovery manager: %v", err))
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	recovery.StartAutoSave(ctx)
+
+	syncManager := &SyncManager{
+		providers: make(map[CloudProvider]CloudStorage),
+		logger:    logger,
+		recovery:  recovery,
+		notifier:  NewNotifier(),
+	}
+
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		cmd.SetContext(context.WithValue(cmd.Context(), syncManagerKey, syncManager))
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func getSyncManager(cmd *cobra.Command) *SyncManager {
+	return cmd.Context().Value(syncManagerKey).(*SyncManager)
 }
 
 var rootCmd = &cobra.Command{
@@ -128,4 +163,17 @@ func logCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func NewNotifier() *Notifier {
+	// For now returning a basic notifier with empty config
+	return &Notifier{
+		emailConfig: EmailConfig{
+			SMTPServer: "",
+			Port:       587,
+			Username:   "",
+			Password:   "",
+			FromEmail:  "",
+		},
+	}
 }

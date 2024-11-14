@@ -20,13 +20,15 @@ type SyncManager struct {
 	Providers map[types.CloudProvider]types.CloudStorage
 	Logger    *types.Logger
 	Notifier  *types.Notifier
+	Recovery  *RecoveryManager
 }
 
-func NewSyncManager(logger *types.Logger, notifier *types.Notifier) *SyncManager {
+func NewSyncManager(logger *types.Logger, notifier *types.Notifier, recovery *RecoveryManager) *SyncManager {
 	return &SyncManager{
 		Providers: make(map[types.CloudProvider]types.CloudStorage),
 		Logger:    logger,
 		Notifier:  notifier,
+		Recovery:  recovery,
 	}
 }
 
@@ -76,15 +78,43 @@ func (sm *SyncManager) Sync(ctx context.Context, opts types.SyncOptions) error {
 }
 
 func (sm *SyncManager) processFile(ctx context.Context, job SyncJob, source, dest types.CloudStorage, opts types.SyncOptions) error {
-	destInfo, err := dest.GetFileInfo(ctx, job.DestinationPath)
-	if err == nil {
-		if err := sm.handleConflict(ctx, job, destInfo, source, dest, opts); err != nil {
-			return err
-		}
+	rm := sm.Recovery
+	fileState, exists := rm.GetFileState(job.SourcePath)
+
+	if exists && fileState.Status == "completed" {
 		return nil
 	}
 
-	return sm.transferFile(ctx, job, source, dest)
+	if exists && fileState.Attempts >= sm.Recovery.maxAttempts {
+		sm.Logger.LogError(fmt.Sprintf("max retry attempts exceeded for file: %s", job.SourcePath))
+		return fmt.Errorf("max retry attempts exceeded for file: %s", job.SourcePath)
+	}
+
+	fileState = FileState{
+		Path:         job.SourcePath,
+		Size:         job.FileInfo.Size,
+		LastModified: job.FileInfo.LastModified,
+		ETag:         job.FileInfo.ETag,
+		Status:       "in_progress",
+		Attempts:     fileState.Attempts + 1,
+	}
+	rm.UpdateFileState(fileState)
+
+	err := sm.transferFile(ctx, job, source, dest)
+	if err != nil {
+		sm.Logger.LogError(fmt.Sprintf("Failed to transfer file %s: %v", job.SourcePath, err))
+
+		fileState.Status = "failed"
+		rm.UpdateFileState(fileState)
+		return err
+	}
+
+	fileState.Status = "completed"
+	rm.UpdateFileState(fileState)
+
+	sm.Logger.LogInfo(fmt.Sprintf("Transferred %d bytes from %s to %s", job.FileInfo.Size, job.SourcePath, job.DestinationPath))
+
+	return nil
 }
 
 func (sm *SyncManager) handleConflict(ctx context.Context, job SyncJob, destInfo types.FileInfo, source, dest types.CloudStorage, opts types.SyncOptions) error {
